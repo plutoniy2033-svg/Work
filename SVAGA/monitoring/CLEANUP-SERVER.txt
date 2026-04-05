@@ -1,0 +1,32 @@
+# =============================================================================
+# Очистка на Ubuntu (всё, что ставили под /opt/hysteria-monitor + systemd).
+# Выполнять от root:  sudo bash CLEANUP-SERVER.txt
+# Или скопируй только блок ниже от set -euo до последней строки.
+#
+# Рекомендация: сохрани секреты перед удалением:
+#   cp /opt/hysteria-monitor/config/hysteria-monitor.env ~/hysteria-monitor.env.bak
+# =============================================================================
+
+set -euo pipefail
+
+systemctl stop telegram-poller.service 2>/dev/null || true
+
+systemctl disable --now hysteria-monitor.timer 2>/dev/null || true
+systemctl disable --now load-alert.timer 2>/dev/null || true
+systemctl disable --now telegram-poller.service 2>/dev/null || true
+
+systemctl disable hysteria-monitor.service 2>/dev/null || true
+systemctl disable load-alert.service 2>/dev/null || true
+
+rm -f /etc/systemd/system/hysteria-monitor.service
+rm -f /etc/systemd/system/hysteria-monitor.timer
+rm -f /etc/systemd/system/load-alert.service
+rm -f /etc/systemd/system/load-alert.timer
+rm -f /etc/systemd/system/telegram-poller.service
+
+systemctl daemon-reload
+systemctl reset-failed 2>/dev/null || true
+
+rm -rf /opt/hysteria-monitor
+
+echo "Очистка завершена. Дальше: git clone … и настройка GitHub Actions + install-from-repo.sh"

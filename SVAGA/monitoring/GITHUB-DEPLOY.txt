@@ -1,0 +1,133 @@
+================================================================================
+ДЕПЛОЙ МОНИТОРИНГА: СЕРВЕР + GITHUB (ПОШАГОВО, ДЛЯ ЧАЙНИКОВ)
+================================================================================
+
+ВАЖНО СРАЗУ
+----------
+GitHub и твой VPS сами по себе НИКАК не связаны. Это не «магия репозитория».
+Связь бывает двух видов:
+
+  A) Ты заходишь на сервер по SSH и делаешь git pull — деплой руками. Секретов в
+     GitHub не нужно.
+
+  B) Ты хочешь, чтобы после push на GitHub сам бегал деплой — тогда в репозитории
+     в настройках Actions нужно ДОБАВИТЬ 4 секрета (ключ SSH и пути). Пока их
+     нет — workflow будет падать с ошибкой. Это нормально.
+
+Файл workflow лежит в репозитории: .github/workflows/monitoring-deploy.yml
+Полная инструкция — этот файл.
+
+
+--------------------------------------------------------------------------------
+ЧАСТЬ 1. ОДИН РАЗ: СЕРВЕР БЕЗ АВТОМАТИКИ GITHUB (МОЖНО ЖИТЬ ТАК НАВСЕГДА)
+--------------------------------------------------------------------------------
+
+1.1. На GitHub уже есть репозиторий с папкой SVAGA/monitoring/ (как у тебя в проекте).
+
+1.2. Зайди на сервер по SSH (Ubuntu 24.04).
+
+1.3. Поставь git (если нет):
+     sudo apt update && sudo apt install -y git curl jq iproute2
+
+1.4. Куда клонировать — на твой вкус, пример:
+     sudo mkdir -p /opt && sudo chown $USER:$USER /opt
+     cd /opt
+     git clone https://github.com/plutoniy2033-svg/Work.git repo
+     cd repo
+
+     Если репозиторий приватный — GitHub попросит логин/пароль. Пароль НЕ подойдёт,
+     нужен Personal Access Token (PAT): GitHub → Settings → Developer settings →
+     Personal access tokens → сгенерировать, при clone вставить вместо пароля.
+
+1.5. Первый деплой скриптов мониторинга:
+     sudo bash SVAGA/monitoring/install-from-repo.sh
+
+     Если у тебя в репозитории НЕТ папки SVAGA (только monitoring в корне), команда:
+     sudo bash monitoring/install-from-repo.sh
+
+1.6. Токены Telegram (обязательно):
+     sudo nano /opt/hysteria-monitor/config/hysteria-monitor.env
+     Заполни TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID, сохрани.
+     sudo chmod 600 /opt/hysteria-monitor/config/hysteria-monitor.env
+
+1.7. Проверка:
+     systemctl status telegram-poller.service --no-pager
+     systemctl list-timers | grep -E 'hysteria|load-alert'
+
+Каждый раз, когда ты меняешь код мониторинга в Git и пушишь на GitHub:
+
+  ssh на сервер → cd /opt/repo → git pull → sudo bash SVAGA/monitoring/install-from-repo.sh
+
+(путь к репо и к скрипту подставь свои). Секреты в GitHub для этого НЕ НУЖНЫ.
+
+
+--------------------------------------------------------------------------------
+ЧАСТЬ 2. ОПЦИОНАЛЬНО: ПОДКЛЮЧИТЬ GITHUB ACTIONS (АВТОДЕПЛОЙ ПОСЛЕ PUSH)
+--------------------------------------------------------------------------------
+
+Зачем: после push в ветку main или master (и изменениях в SVAGA/monitoring/**)
+GitHub сам подключится к серверу по SSH, сделает git pull и снова install-from-repo.sh.
+
+Что нужно: 4 секрета в репозитории GitHub (Settings → Secrets and variables → Actions).
+
+Шаг 2.1. На сервере заведи отдельного пользователя для деплоя (можно и root, но
+         лучше отдельный), например deploy:
+         sudo adduser deploy
+         sudo usermod -aG sudo deploy
+
+Шаг 2.2. На сервере зайди под этим пользователем и сгенерируй ключ БЕЗ пароля
+         (этот ключ положим в GitHub — его увидит только GitHub Actions):
+         sudo su - deploy
+         ssh-keygen -t ed25519 -f ~/.ssh/github_actions_monitoring -N ""
+         cat ~/.ssh/github_actions_monitoring.pub >> ~/.ssh/authorized_keys
+         chmod 600 ~/.ssh/authorized_keys
+         cat ~/.ssh/github_actions_monitoring
+         Скопируй ВЕСЬ вывод приватного ключа (от -----BEGIN до -----END) — это
+         будет секрет MONITORING_SSH_PRIVATE_KEY.
+
+Шаг 2.3. У пользователя deploy должен быть клон того же репозитория и права на
+         git pull в этой папке. Проще всего клонировать репозиторий в домашнюю
+         папку deploy:
+         cd ~ && git clone https://github.com/ТВОЙ/РЕПО.git repo
+         (для приватного репо — PAT или SSH-ключ deploy для github.com)
+
+Шаг 2.4. Sudo без пароля ТОЛЬКО для нужных команд (от root):
+         sudo visudo -f /etc/sudoers.d/deploy-monitoring
+         Строка (подставь имя пользователя deploy):
+         deploy ALL=(ALL) NOPASSWD: /usr/bin/bash, /bin/bash, /usr/bin/git, /usr/bin/systemctl
+
+Шаг 2.5. В GitHub → твой репозиторий → Settings → Secrets and variables → Actions
+         → New repository secret. Создай четыре секрета:
+
+         MONITORING_SSH_HOST          → IP или домен сервера (например 1.2.3.4)
+         MONITORING_SSH_USER          → deploy
+         MONITORING_SSH_PRIVATE_KEY   → весь приватный ключ из шага 2.2
+         MONITORING_REPO_PATH         → абсолютный путь к клону, например /home/deploy/repo
+
+Шаг 2.6. В файле workflow путь к скрипту: SVAGA/monitoring/install-from-repo.sh
+         Если у тебя репозиторий без папки SVAGA — отредактируй workflow в GitHub
+         (или локально и push) на свой путь, например monitoring/install-from-repo.sh
+
+Шаг 2.7. Проверка: вкладка Actions → выбери workflow → Run workflow (если включён
+         ручной запуск) или сделай любой commit в SVAGA/monitoring/ и push в main.
+
+Пока секреты не заданы — job упадёт. Это ожидаемо.
+
+
+--------------------------------------------------------------------------------
+ЧАСТЬ 3. ЕСЛИ ЧТО-ТО СЛОМАЛОСЬ
+--------------------------------------------------------------------------------
+
+  journalctl -u telegram-poller.service -n 50 --no-pager
+  sudo bash SVAGA/monitoring/install-from-repo.sh
+  systemctl daemon-reload && systemctl restart telegram-poller.service
+
+Полная очистка старой установки (до перехода на git): см. CLEANUP-SERVER.txt
+
+
+================================================================================
+Кратко
+================================================================================
+  Без связи GitHub↔сервер:  git pull на сервере + install-from-repo.sh — хватает.
+  С автодеплоем:            4 секрета + SSH ключ + sudoers + клон у пользователя деплоя.
+================================================================================

@@ -37,8 +37,11 @@ Unit-файлы systemd (→ /etc/systemd/system/):
 
 Прочее:
 
+  GITHUB-DEPLOY.txt
+    Пошагово: сервер + git clone + install-from-repo; опционально GitHub Actions и 4 секрета.
+
   UBUNTU-INSTALL-BLOCK.txt
-    То же самое одним блоком bash для вставки на сервер (проще всего). sudo bash …
+    Один блок bash без git (всё в /opt). Если работаешь из репозитория — лучше install-from-repo.sh.
 
   INSTALL.txt
     Дубликат-скрипт с heredoc (как UBUNTU-INSTALL-BLOCK). Запуск: bash после правки TG_TOKEN

@@ -1,0 +1,35 @@
+# Автодеплой только если в репозитории заданы секреты Actions (см. ниже).
+# Пошаговая инструкция с нуля: SVAGA/monitoring/GITHUB-DEPLOY.txt
+#
+# Secrets → Settings → Secrets and variables → Actions:
+#   MONITORING_SSH_HOST, MONITORING_SSH_USER, MONITORING_SSH_PRIVATE_KEY, MONITORING_REPO_PATH
+# Без секретов job будет падать — это нормально; деплой тогда только вручную: git pull + install-from-repo.sh
+
+name: Deploy monitoring
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'SVAGA/monitoring/**'
+      - '.github/workflows/monitoring-deploy.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH — git pull и установка из репозитория
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.MONITORING_SSH_HOST }}
+          username: ${{ secrets.MONITORING_SSH_USER }}
+          key: ${{ secrets.MONITORING_SSH_PRIVATE_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.MONITORING_REPO_PATH }}"
+            git fetch origin
+            BR="$(git rev-parse --abbrev-ref HEAD)"
+            git reset --hard "origin/${BR}"
+            sudo bash SVAGA/monitoring/install-from-repo.sh
