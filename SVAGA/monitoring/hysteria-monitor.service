@@ -1,0 +1,12 @@
+[Unit]
+Description=Проверка сервисов Hysteria и оповещение в Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hysteria-monitor
+ExecStart=/opt/hysteria-monitor/bin/hysteria-service-monitor.sh
+
+# Не поднимать весь юнит при ошибке проверки (сервисы лежат)
+SuccessExitStatus=0 1

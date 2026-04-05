@@ -1,0 +1,14 @@
+[Unit]
+Description=Telegram long poll: команда /status для метрик сервера
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/hysteria-monitor
+ExecStart=/opt/hysteria-monitor/bin/telegram-poller.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

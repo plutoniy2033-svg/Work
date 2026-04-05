@@ -1,0 +1,95 @@
+================================================================================
+ФАЙЛЫ В monitoring/ — что это
+================================================================================
+
+Скрипты (ставятся в /opt/hysteria-monitor/bin/):
+
+  hysteria-service-monitor.sh
+    Раз в минуту (таймер): проверка hysteria-*.service, автозапуск упавших,
+    Telegram при сбоях / восстановлении / «простой снят автозапуском».
+
+  server-metrics.sh
+    Не запускать отдельно: библиотека с build_status_report и collect_load_state
+    (подключается через source в load-alert и telegram-poller).
+
+  load-alert.sh
+    Раз в 2 мин (таймер): loadavg / RAM / диск — алерты в тот же канал, дедуп.
+
+  telegram-poller.sh
+    Постоянный процесс: long polling getUpdates, ответ на /status в том чате,
+    где написали (канал / группа / ЛС).
+
+Unit-файлы systemd (→ /etc/systemd/system/):
+
+  hysteria-monitor.service + hysteria-monitor.timer
+    oneshot + раз в 1 мин.
+
+  load-alert.service + load-alert.timer
+    oneshot + раз в 2 мин.
+
+  telegram-poller.service
+    Type=simple, Restart=always — держит /status.
+
+Конфиг:
+
+  config/example.env
+    Шаблон переменных для копирования в hysteria-monitor.env на сервере.
+
+Прочее:
+
+  UBUNTU-INSTALL-BLOCK.txt
+    То же самое одним блоком bash для вставки на сервер (проще всего). sudo bash …
+
+  INSTALL.txt
+    Дубликат-скрипт с heredoc (как UBUNTU-INSTALL-BLOCK). Запуск: bash после правки TG_TOKEN
+
+  DEPLOY-ALL.txt
+    Этот файл: краткое описание + единый блок, если каталог monitoring/ уже на сервере.
+
+================================================================================
+ЕДИНЫЙ БЛОК КОМАНД (файлы monitoring/ уже лежат на сервере в $MON_SRC)
+================================================================================
+Перед запуском: положи каталог с репозиторием на машину, например ~/SVAGA/monitoring,
+и задай MON_SRC. Должен существовать /opt/hysteria-monitor/config/hysteria-monitor.env
+с TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID (или сначала выполни INSTALL.txt).
+
+set -euo pipefail
+
+MON_SRC="${MON_SRC:-$HOME/SVAGA/monitoring}"
+M="/opt/hysteria-monitor"
+
+command -v curl >/dev/null && command -v jq >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y curl jq; }
+
+[[ -d "$MON_SRC" ]] || { echo "Нет каталога $MON_SRC — выставь MON_SRC"; exit 1; }
+[[ -f "$M/config/hysteria-monitor.env" ]] || { echo "Нет $M/config/hysteria-monitor.env — создай или запусти INSTALL.txt"; exit 1; }
+
+sudo mkdir -p "$M/bin" "$M/config" "$M/state"
+
+sudo install -m 755 "$MON_SRC/hysteria-service-monitor.sh" "$MON_SRC/load-alert.sh" "$MON_SRC/telegram-poller.sh" "$M/bin/"
+sudo install -m 644 "$MON_SRC/server-metrics.sh" "$M/bin/"
+
+sudo install -m 644 "$MON_SRC/hysteria-monitor.service" "$MON_SRC/hysteria-monitor.timer" \
+  "$MON_SRC/load-alert.service" "$MON_SRC/load-alert.timer" "$MON_SRC/telegram-poller.service" \
+  /etc/systemd/system/
+
+ENV="$M/config/hysteria-monitor.env"
+append_if_missing() { grep -qF "$1" "$ENV" 2>/dev/null || printf '%s\n' "$2" | sudo tee -a "$ENV" >/dev/null; }
+
+append_if_missing "LOAD_ALERT_ENABLED=" $'# --- нагрузка / poller (добавлено DEPLOY-ALL)\nLOAD_ALERT_ENABLED=1\nLOAD_ALERT_1M=0\nMEM_ALERT_PCT=90\nDISK_ALERT_PCT=90\nSTATUS_ALLOWED_CHAT_IDS=\n'
+
+sudo chmod 600 "$ENV" 2>/dev/null || true
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now hysteria-monitor.timer load-alert.timer telegram-poller.service
+
+sudo systemctl restart telegram-poller.service 2>/dev/null || true
+
+echo "OK. Проверка:"
+systemctl is-active hysteria-monitor.timer load-alert.timer telegram-poller.service
+sudo "$M/bin/load-alert.sh" || true
+echo "В Telegram: /status"
+
+================================================================================
+Дальше в ответах по этому проекту: единый блок = этот блок (или INSTALL.txt для
+чистого сервера без копии файлов) + кратко «что за файлы» из таблицы выше.
+================================================================================

@@ -1,0 +1,539 @@
+# =============================================================================
+# Ubuntu 24.04 — только bash, без Python.
+# Скопируй всё от строки "set -euo pipefail" до конца файла.
+# Запуск от root:   sudo bash UBUNTU-INSTALL-BLOCK.txt
+# Либо: nano install.sh → вставить блок → chmod +x install.sh && sudo ./install.sh
+# Перед запуском замени TG_TOKEN (и при необходимости TG_CHAT).
+# =============================================================================
+
+set -euo pipefail
+
+TG_TOKEN='ВСТАВЬ_СЮДА_ТОКЕН_БОТА'
+TG_CHAT='-5013050970'
+
+apt-get update -qq
+apt-get install -y curl jq iproute2
+
+mkdir -p /opt/hysteria-monitor/{bin,config,state}
+
+tee /opt/hysteria-monitor/config/hysteria-monitor.env >/dev/null <<EOF
+TELEGRAM_BOT_TOKEN=${TG_TOKEN}
+TELEGRAM_CHAT_ID=${TG_CHAT}
+AUTO_START_FAILED=1
+AUTO_START_DELAY_SEC=2
+LOAD_ALERT_ENABLED=1
+LOAD_ALERT_1M=0
+MEM_ALERT_PCT=90
+DISK_ALERT_PCT=90
+STATUS_ALLOWED_CHAT_IDS=
+EOF
+chmod 600 /opt/hysteria-monitor/config/hysteria-monitor.env
+
+tee /opt/hysteria-monitor/bin/hysteria-service-monitor.sh >/dev/null <<'EOFSCRIPT'
+#!/usr/bin/env bash
+# Проверка systemd-сервисов Hysteria; при падении — автозапуск; Telegram при проблемах.
+# Дерево: /opt/hysteria-monitor/{bin,config,state}
+# config/hysteria-monitor.env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+# Опционально: AUTO_START_FAILED=1 (по умолчанию), AUTO_START_DELAY_SEC=2
+
+set -euo pipefail
+
+MONITOR_ROOT="${MONITOR_ROOT:-/opt/hysteria-monitor}"
+ENV_FILE="${ENV_FILE:-$MONITOR_ROOT/config/hysteria-monitor.env}"
+STATE_DIR="${STATE_DIR:-$MONITOR_ROOT/state}"
+STATE_FILE="${STATE_FILE:-$STATE_DIR/last_problems}"
+
+SERVICES=(
+  hysteria-auth.service
+  hysteria-caddy.service
+  hysteria-scheduler.service
+  hysteria-server.service
+  hysteria-webpanel.service
+)
+
+if [[ ! -r "$ENV_FILE" ]]; then
+  echo "hysteria-monitor: нет или нет чтения $ENV_FILE" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$ENV_FILE"
+
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+  echo "hysteria-monitor: задайте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в $ENV_FILE" >&2
+  exit 1
+fi
+
+AUTO_START_FAILED="${AUTO_START_FAILED:-1}"
+AUTO_START_DELAY_SEC="${AUTO_START_DELAY_SEC:-2}"
+
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR" 2>/dev/null || true
+
+send_tg() {
+  local text="$1"
+  curl -sS -m 25 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$text" \
+      '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')" >/dev/null
+}
+
+collect_problems() {
+  problems=()
+  local svc active enabled ok msg_bits
+  for svc in "${SERVICES[@]}"; do
+    active="$(systemctl is-active "$svc" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$svc" 2>/dev/null || true)"
+    [[ -z "$active" ]] && active="unknown"
+    [[ -z "$enabled" ]] && enabled="unknown"
+    ok=true
+    msg_bits=()
+
+    if [[ "$active" != "active" ]]; then
+      ok=false
+      msg_bits+=("active=$active (нужно active)")
+    fi
+    if [[ "$enabled" == disabled || "$enabled" == masked ]]; then
+      ok=false
+      msg_bits+=("enabled=$enabled (нужно enabled)")
+    fi
+
+    if [[ "$ok" != true ]]; then
+      problems+=("$svc: ${msg_bits[*]}")
+    fi
+  done
+}
+
+try_auto_start_inactive() {
+  HYS_STARTED_ANY=false
+  local svc active enabled
+  for svc in "${SERVICES[@]}"; do
+    active="$(systemctl is-active "$svc" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$svc" 2>/dev/null || true)"
+    [[ -z "$active" ]] && active="unknown"
+    [[ -z "$enabled" ]] && enabled="unknown"
+
+    [[ "$active" == "active" ]] && continue
+    [[ "$enabled" == disabled || "$enabled" == masked ]] && continue
+
+    systemctl reset-failed "$svc" 2>/dev/null || true
+    systemctl start "$svc" 2>/dev/null || true
+    HYS_STARTED_ANY=true
+  done
+  if [[ "$HYS_STARTED_ANY" == true ]]; then
+    sleep "$AUTO_START_DELAY_SEC"
+  fi
+}
+
+collect_problems
+had_initial_problems=false
+((${#problems[@]})) && had_initial_problems=true
+
+HYS_STARTED_ANY=false
+auto_note=""
+if [[ "$AUTO_START_FAILED" == "1" || "$AUTO_START_FAILED" == "true" || "$AUTO_START_FAILED" == "yes" ]]; then
+  if ((${#problems[@]})); then
+    try_auto_start_inactive
+    collect_problems
+    if [[ "$HYS_STARTED_ANY" == true ]]; then
+      auto_note="
+Был выполнен автозапуск (reset-failed + start); ниже состояние после паузы ${AUTO_START_DELAY_SEC}s."
+    fi
+  fi
+fi
+
+if ((${#problems[@]})); then
+  current_sig="$(printf '%s\n' "${problems[@]}" | sha256sum | awk '{print $1}')"
+else
+  current_sig="ALL_OK"
+fi
+prev_sig=""
+[[ -f "$STATE_FILE" ]] && prev_sig="$(cat "$STATE_FILE" 2>/dev/null | head -1 || true)"
+
+if ((${#problems[@]})); then
+  body="⚠️ Hysteria: проблемы со сервисами ($(hostname -f 2>/dev/null || hostname))
+$(printf '%s\n' "${problems[@]}")${auto_note}
+Время: $(date -Is)"
+  if [[ "$current_sig" != "$prev_sig" ]]; then
+    send_tg "$body"
+    printf '%s\n' "$current_sig" >"$STATE_FILE"
+  fi
+  exit 1
+else
+  if [[ -n "$prev_sig" ]]; then
+    send_tg "✅ Hysteria: все сервисы в норме ($(hostname -f 2>/dev/null || hostname))
+Время: $(date -Is)"
+    rm -f "$STATE_FILE"
+  elif [[ "$had_initial_problems" == true && "$HYS_STARTED_ANY" == true ]]; then
+    send_tg "ℹ️ Hysteria: зафиксирован простой, автозапуск отработал; сейчас все active ($(hostname -f 2>/dev/null || hostname))
+Время: $(date -Is)"
+  fi
+  exit 0
+fi
+EOFSCRIPT
+chmod 755 /opt/hysteria-monitor/bin/hysteria-service-monitor.sh
+
+tee /opt/hysteria-monitor/bin/server-metrics.sh >/dev/null <<'EOFMET'
+#!/usr/bin/env bash
+# Общие метрики для алертов и ответа /status. Источник: source (не запускать напрямую).
+
+build_status_report() {
+  local host cores load1 load5 load15 mt ma mf used_pct root_use root_avail
+  host=$(hostname -f 2>/dev/null || hostname)
+  cores=$(nproc 2>/dev/null || echo "?")
+  read -r load1 load5 load15 _ < /proc/loadavg
+
+  mt=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+  ma=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+  [[ -z "${ma:-}" || "$ma" -eq 0 ]] 2>/dev/null && ma=$(awk '/^MemFree:/ {print $2}' /proc/meminfo)
+  mf=$(awk '/^MemFree:/ {print $2}' /proc/meminfo)
+  if [[ -n "${mt:-}" && "${mt:-0}" -gt 0 ]]; then
+    used_pct=$(( (mt - ma) * 100 / mt ))
+  else
+    used_pct="?"
+  fi
+
+  root_use=$(df -P / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+  root_avail=$(df -Ph / 2>/dev/null | awk 'NR==2 {print $4}')
+
+  {
+    echo "🖥 ${host}"
+    echo "⏱ $(date -Is)"
+    echo ""
+    echo "=== Load (1/5/15) ==="
+    echo "${load1} ${load5} ${load15}  (ядер CPU: ${cores})"
+    echo ""
+    echo "=== Memory (kB из /proc/meminfo) ==="
+    echo "MemTotal: ${mt:-?}  MemAvailable: ${ma:-?}  MemFree: ${mf:-?}"
+    echo "Использование RAM ~${used_pct}%"
+    echo ""
+    echo "=== Disk / ==="
+    echo "Занято: ${root_use:-?}%  Доступно: ${root_avail:-?}"
+    df -Ph / 2>/dev/null | tail -n +1
+    echo ""
+    echo "=== Сеть: интерфейсы ==="
+    ip -br link 2>/dev/null || true
+    echo ""
+    echo "=== Сеть: /proc/net/dev (фрагмент) ==="
+    grep -v '^\s*lo:' /proc/net/dev 2>/dev/null | tail -n +3 | head -12 || true
+    echo ""
+    echo "=== Uptime ==="
+    uptime -p 2>/dev/null || uptime
+  }
+}
+
+collect_load_state() {
+  REASONS=()
+  read -r LOAD1 _ < /proc/loadavg
+  local cores
+  cores="$(nproc 2>/dev/null || echo 1)"
+  local thr="${LOAD_ALERT_1M:-}"
+  [[ -z "$thr" || "$thr" == "0" ]] && thr="$cores"
+  if awk -v l="$LOAD1" -v t="$thr" 'BEGIN{exit !((l+0) >= (t+0))}'; then
+    REASONS+=("load1=${LOAD1} >= ${thr} (порог: LOAD_ALERT_1M или по умолчанию ядер=${cores})")
+  fi
+
+  local mt ma
+  mt=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+  ma=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+  [[ -z "${ma:-}" ]] && ma=$(awk '/^MemFree:/ {print $2}' /proc/meminfo)
+  MEM_USED_PCT=0
+  if [[ -n "${mt:-}" && "${mt:-0}" -gt 0 ]]; then
+    MEM_USED_PCT=$(( (mt - ma) * 100 / mt ))
+  fi
+  local memp="${MEM_ALERT_PCT:-90}"
+  if [[ "$MEM_USED_PCT" -ge "$memp" ]]; then
+    REASONS+=("RAM занято ~${MEM_USED_PCT}% (порог ${memp}%)")
+  fi
+
+  DISK_USE_PCT=$(df -P / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5+0}')
+  local diskp="${DISK_ALERT_PCT:-90}"
+  if [[ "${DISK_USE_PCT:-0}" -ge "$diskp" ]]; then
+    REASONS+=("диск / занят ${DISK_USE_PCT}% (порог ${diskp}%)")
+  fi
+
+  ((${#REASONS[@]} > 0))
+}
+EOFMET
+chmod 644 /opt/hysteria-monitor/bin/server-metrics.sh
+
+tee /opt/hysteria-monitor/bin/load-alert.sh >/dev/null <<'EOFLOAD'
+#!/usr/bin/env bash
+# Алерты в Telegram при высокой нагрузке / RAM / диск.
+set -euo pipefail
+
+MONITOR_ROOT="${MONITOR_ROOT:-/opt/hysteria-monitor}"
+ENV_FILE="${ENV_FILE:-$MONITOR_ROOT/config/hysteria-monitor.env}"
+STATE_DIR="${STATE_DIR:-$MONITOR_ROOT/state}"
+STATE_FILE="${STATE_FILE:-$STATE_DIR/load_alert_sig}"
+METRICS_LIB="${METRICS_LIB:-$MONITOR_ROOT/bin/server-metrics.sh}"
+
+if [[ ! -r "$ENV_FILE" ]]; then
+  echo "load-alert: нет $ENV_FILE" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$ENV_FILE"
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+  echo "load-alert: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID" >&2
+  exit 1
+fi
+if [[ ! -r "$METRICS_LIB" ]]; then
+  echo "load-alert: нет $METRICS_LIB" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$METRICS_LIB"
+
+LOAD_ALERT_ENABLED="${LOAD_ALERT_ENABLED:-1}"
+[[ "$LOAD_ALERT_ENABLED" == "0" || "$LOAD_ALERT_ENABLED" == "false" ]] && exit 0
+
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR" 2>/dev/null || true
+
+send_tg() {
+  local text="$1"
+  curl -sS -m 25 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -nc --arg chat_id "$TELEGRAM_CHAT_ID" --arg text "$text" \
+      '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')" >/dev/null
+}
+
+trim4096() {
+  local s="$1"
+  ((${#s} > 3900)) && s="${s:0:3900}"$'\n…(обрезано)'
+  printf '%s' "$s"
+}
+
+if collect_load_state; then
+  body="🔥 Высокая нагрузка / ресурсы ($(hostname -f 2>/dev/null || hostname))
+$(printf '%s\n' "${REASONS[@]}")
+
+--- снимок ---
+$(trim4096 "$(build_status_report)")"
+  sig="$(printf '%s\n' "${REASONS[@]}" | sha256sum | awk '{print $1}')"
+else
+  sig="OK"
+fi
+
+prev=""
+[[ -f "$STATE_FILE" ]] && prev="$(head -1 "$STATE_FILE" 2>/dev/null || true)"
+
+if [[ "$sig" != "OK" ]]; then
+  if [[ "$sig" != "$prev" ]]; then
+    send_tg "$body"
+    printf '%s\n' "$sig" >"$STATE_FILE"
+  fi
+  exit 1
+else
+  if [[ -n "$prev" && "$prev" != "OK" ]]; then
+    send_tg "✅ Нагрузка и ресурсы в норме ($(hostname -f 2>/dev/null || hostname))
+Время: $(date -Is)"
+    rm -f "$STATE_FILE"
+  fi
+  exit 0
+fi
+EOFLOAD
+chmod 755 /opt/hysteria-monitor/bin/load-alert.sh
+
+tee /opt/hysteria-monitor/bin/telegram-poller.sh >/dev/null <<'EOFPOLL'
+#!/usr/bin/env bash
+# Long polling: ответ на /status в чате/канале (тот же бот).
+# Без set -e в цикле: иначе любой сбой jq/curl рвёт процесс и /status «молчит».
+set -uo pipefail
+
+MONITOR_ROOT="${MONITOR_ROOT:-/opt/hysteria-monitor}"
+ENV_FILE="${ENV_FILE:-$MONITOR_ROOT/config/hysteria-monitor.env}"
+STATE_DIR="${STATE_DIR:-$MONITOR_ROOT/state}"
+OFFSET_FILE="${OFFSET_FILE:-$STATE_DIR/telegram_updates_offset}"
+METRICS_LIB="${METRICS_LIB:-$MONITOR_ROOT/bin/server-metrics.sh}"
+
+if [[ ! -r "$ENV_FILE" ]]; then
+  echo "poller: нет $ENV_FILE" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$ENV_FILE"
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  echo "poller: TELEGRAM_BOT_TOKEN" >&2
+  exit 1
+fi
+if [[ ! -r "$METRICS_LIB" ]]; then
+  echo "poller: нет $METRICS_LIB" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$METRICS_LIB"
+
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR" 2>/dev/null || true
+
+OFFSET=0
+[[ -f "$OFFSET_FILE" ]] && OFFSET="$(tr -dc '0-9' <"$OFFSET_FILE" | head -c 20 || true)"
+[[ -z "$OFFSET" ]] && OFFSET=0
+
+API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
+
+json_ok() {
+  local j="$1"
+  [[ "$(jq -r '.ok // false' <<<"$j" 2>/dev/null)" == "true" ]]
+}
+
+send_to_chat() {
+  local cid="$1" text="$2"
+  local payload out
+  ((${#text} > 3900)) && text="${text:0:3900}"$'\n…(обрезано)'
+  payload="$(jq -nc --arg chat_id "$cid" --arg text "$text" \
+    '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}' 2>/dev/null)" || {
+    echo "poller: jq payload failed" >&2
+    return 1
+  }
+  out="$(curl -sS -m 45 -X POST "${API}/sendMessage" -H 'Content-Type: application/json' -d "$payload" 2>&1)" || {
+    echo "poller: curl sendMessage failed: $out" >&2
+    return 1
+  }
+  if ! json_ok "$out"; then
+    echo "poller: sendMessage API: $out" >&2
+    return 1
+  fi
+  return 0
+}
+
+is_status_cmd() {
+  local t="${1:-}"
+  t="${t#"${t%%[![:space:]]*}"}"
+  t="${t%%$'\r'}"
+  [[ "${t,,}" =~ ^/status(@[A-Za-z0-9_]+)?([[:space:]].*)?$ ]]
+}
+
+curl -sS -m 20 "${API}/deleteWebhook?drop_pending_updates=false" >/dev/null 2>&1 || true
+
+me="$(curl -sS -m 15 "${API}/getMe" 2>&1)" || me=""
+if json_ok "$me"; then
+  echo "poller: ok, бот @$(jq -r '.result.username // "?"' <<<"$me")" >&2
+else
+  echo "poller: getMe не ok — проверь токен: ${me:0:200}" >&2
+fi
+
+echo "poller: long poll старт, offset=$OFFSET (логи: journalctl -u telegram-poller -f)" >&2
+
+while true; do
+  resp=""
+  if ! resp="$(curl -sS -m 65 "${API}/getUpdates?offset=${OFFSET}&timeout=55&allowed_updates=%5B%22message%22%2C%22channel_post%22%2C%22edited_message%22%2C%22edited_channel_post%22%5D" 2>&1)"; then
+    echo "poller: getUpdates curl error: ${resp:0:300}" >&2
+    sleep 5
+    continue
+  fi
+  if ! json_ok "$resp"; then
+    echo "poller: getUpdates не ok: ${resp:0:400}" >&2
+    sleep 5
+    continue
+  fi
+
+  new_off="$OFFSET"
+  while IFS= read -r item || [[ -n "$item" ]]; do
+    [[ -z "${item:-}" || "$item" == "null" ]] && continue
+    uid="$(jq -r '.update_id // empty' <<<"$item" 2>/dev/null)"
+    [[ "$uid" =~ ^[0-9]+$ ]] || continue
+    new_off=$((uid + 1))
+
+    text="$(jq -r '.message.text // .channel_post.text // .edited_message.text // .edited_channel_post.text // empty' <<<"$item" 2>/dev/null)"
+    chat_id="$(jq -r '.message.chat.id // .channel_post.chat.id // .edited_message.chat.id // .edited_channel_post.chat.id // empty' <<<"$item" 2>/dev/null)"
+
+    if [[ -n "$text" && -n "$chat_id" ]] && is_status_cmd "$text"; then
+      allowed="${STATUS_ALLOWED_CHAT_IDS:-}"
+      if [[ -n "$allowed" ]]; then
+        [[ ",${allowed}," == *",${chat_id},""* ]] || continue
+      fi
+      echo "poller: /status от chat_id=$chat_id" >&2
+      rep="$(build_status_report)" || rep="ошибка build_status_report"
+      send_to_chat "$chat_id" "$rep" || true
+    fi
+  done < <(jq -c '.result[]?' <<<"$resp" 2>/dev/null)
+
+  if [[ "$new_off" =~ ^[0-9]+$ ]] && ((new_off > OFFSET)); then
+    OFFSET=$new_off
+    echo "$OFFSET" >"$OFFSET_FILE.tmp"
+    mv -f "$OFFSET_FILE.tmp" "$OFFSET_FILE"
+  fi
+done
+EOFPOLL
+chmod 755 /opt/hysteria-monitor/bin/telegram-poller.sh
+
+tee /etc/systemd/system/hysteria-monitor.service >/dev/null <<'EOFHYSVC'
+[Unit]
+Description=Проверка сервисов Hysteria и оповещение в Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hysteria-monitor
+ExecStart=/opt/hysteria-monitor/bin/hysteria-service-monitor.sh
+SuccessExitStatus=0 1
+EOFHYSVC
+
+tee /etc/systemd/system/hysteria-monitor.timer >/dev/null <<'EOFHYTMR'
+[Unit]
+Description=Каждую минуту — мониторинг Hysteria (Telegram)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOFHYTMR
+
+tee /etc/systemd/system/load-alert.service >/dev/null <<'EOFLDSVC'
+[Unit]
+Description=Проверка нагрузки сервера и алерт в Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hysteria-monitor
+ExecStart=/opt/hysteria-monitor/bin/load-alert.sh
+SuccessExitStatus=0 1
+EOFLDSVC
+
+tee /etc/systemd/system/load-alert.timer >/dev/null <<'EOFLDTMR'
+[Unit]
+Description=Каждые 2 мин — мониторинг нагрузки (Telegram)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOFLDTMR
+
+tee /etc/systemd/system/telegram-poller.service >/dev/null <<'EOFPOLLSVC'
+[Unit]
+Description=Telegram long poll: команда /status для метрик сервера
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/hysteria-monitor
+ExecStart=/opt/hysteria-monitor/bin/telegram-poller.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOFPOLLSVC
+
+systemctl daemon-reload
+systemctl enable --now hysteria-monitor.timer load-alert.timer telegram-poller.service
+systemctl restart telegram-poller.service
+
+echo "Готово. Проверка: journalctl -u telegram-poller -f  затем в Telegram /status"
+/opt/hysteria-monitor/bin/hysteria-service-monitor.sh || true
+/opt/hysteria-monitor/bin/load-alert.sh || true

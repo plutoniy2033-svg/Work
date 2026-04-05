@@ -1,0 +1,10 @@
+[Unit]
+Description=Проверка нагрузки сервера и алерт в Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hysteria-monitor
+ExecStart=/opt/hysteria-monitor/bin/load-alert.sh
+SuccessExitStatus=0 1
