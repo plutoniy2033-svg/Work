@@ -1,48 +1,90 @@
 #!/usr/bin/env bash
-# Общие метрики для алертов и ответа /status. Источник: source (не запускать напрямую).
+# Метрики для /status и алертов. source-only.
 
-build_status_report() {
-  local host cores load1 load5 load15 mt ma mf used_pct root_use root_avail
-  host=$(hostname -f 2>/dev/null || hostname)
-  cores=$(nproc 2>/dev/null || echo "?")
-  read -r load1 load5 load15 _ < /proc/loadavg
+fmt_bytes() {
+  local b="${1:-0}"
+  awk -v b="$b" 'BEGIN{split("B KB MB GB TB",u," "); i=1; while(b>=1024 && i<5){b/=1024;i++} printf "%.1f %s", b, u[i]}'
+}
 
+cpu_usage_1s() {
+  local ua na sa ia wa hi si st a_idle a_total ub nb sb ib wb hb sb2 stb b_idle b_total dt di
+  read -r _ ua na sa ia wa hi si st _ < /proc/stat
+  a_idle=$((ia+wa)); a_total=$((ua+na+sa+ia+wa+hi+si+st))
+  sleep 1
+  read -r _ ub nb sb ib wb hb sb2 stb _ < /proc/stat
+  b_idle=$((ib+wb)); b_total=$((ub+nb+sb+ib+wb+hb+sb2+stb))
+  dt=$((b_total-a_total)); di=$((b_idle-a_idle))
+  awk -v dt="$dt" -v di="$di" 'BEGIN{ if(dt<=0){print "?"} else {printf "%.0f%%", (dt-di)*100/dt} }'
+}
+
+mem_human() {
+  local mt ma used
   mt=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
   ma=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
   [[ -z "${ma:-}" || "$ma" -eq 0 ]] 2>/dev/null && ma=$(awk '/^MemFree:/ {print $2}' /proc/meminfo)
-  mf=$(awk '/^MemFree:/ {print $2}' /proc/meminfo)
-  if [[ -n "${mt:-}" && "${mt:-0}" -gt 0 ]]; then
-    used_pct=$(( (mt - ma) * 100 / mt ))
-  else
-    used_pct="?"
-  fi
+  used=$((mt - ma)) # kB
+  awk -v mt="$mt" -v used="$used" 'BEGIN{printf "%.0fMB / %.0fMB (%.0f%%)", (used/1024),(mt/1024),(used/mt)*100}'
+}
 
-  root_use=$(df -P / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
-  root_avail=$(df -Ph / 2>/dev/null | awk 'NR==2 {print $4}')
+net_speed_1s() {
+  local rx1 tx1 rx2 tx2
+  read -r rx1 tx1 < <(awk -F'[: ]+' 'NR>2 && $1!="lo" {rx+=$3; tx+=$11} END{print rx+0, tx+0}' /proc/net/dev)
+  sleep 1
+  read -r rx2 tx2 < <(awk -F'[: ]+' 'NR>2 && $1!="lo" {rx+=$3; tx+=$11} END{print rx+0, tx+0}' /proc/net/dev)
+  echo "↓ $(fmt_bytes $((rx2-rx1)))/s  ↑ $(fmt_bytes $((tx2-tx1)))/s"
+}
+
+active_users_now() {
+  # Считаем уникальные peer IPv4 на входящих сокетах к локальному порту.
+  # Порт задаётся в env: ACTIVE_USERS_PORT=1935
+  local port="${ACTIVE_USERS_PORT:-}"
+  [[ -z "$port" ]] && { echo "?"; return; }
 
   {
-    echo "🖥 ${host}"
-    echo "⏱ $(date -Is)"
+    # UDP: local=$5 peer=$6
+    ss -Hnup 2>/dev/null | awk -v p=":${port}$" '$5 ~ p && $6 !~ /^\*:/ {print $6}'
+    # TCP: local=$4 peer=$5
+    ss -Hntp 2>/dev/null | awk -v p=":${port}$" '$4 ~ p && $5 !~ /^\*:/ {print $5}'
+  } \
+    | sed -E 's/%[^ ]+//; s/^\[//; s/\]$//; s/:[0-9]+$//' \
+    | grep -E '^[0-9]+\.' \
+    | sort -u | wc -l | tr -dc '0-9'
+}
+
+build_status_report() {
+  local host l1 l5 l15 disk_use disk_avail up cpu net users
+  host=$(hostname -f 2>/dev/null || hostname)
+  read -r l1 l5 l15 _ < /proc/loadavg
+  disk_use=$(df -P / 2>/dev/null | awk 'NR==2 {print $5}')
+  disk_avail=$(df -Ph / 2>/dev/null | awk 'NR==2 {print $4}')
+  up=$(uptime -p 2>/dev/null || uptime)
+  cpu=$(cpu_usage_1s)
+  net=$(net_speed_1s)
+  users=$(active_users_now)
+  [[ -z "$users" ]] && users="?"
+
+  {
+    echo "Сервер: ${host}"
+    echo "Время:  $(date -Is)"
     echo ""
-    echo "=== Load (1/5/15) ==="
-    echo "${load1} ${load5} ${load15}  (ядер CPU: ${cores})"
+    echo "VPN:"
+    echo "- Активных пользователей сейчас: ${users}"
     echo ""
-    echo "=== Memory (kB из /proc/meminfo) ==="
-    echo "MemTotal: ${mt:-?}  MemAvailable: ${ma:-?}  MemFree: ${mf:-?}"
-    echo "Использование RAM ~${used_pct}%"
+    echo "Нагрузка:"
+    echo "- CPU usage (≈за 1 секунду): ${cpu}"
+    echo "- Load average (1/5/15 мин): ${l1} / ${l5} / ${l15} (ядер: $(nproc 2>/dev/null || echo '?'))"
     echo ""
-    echo "=== Disk / ==="
-    echo "Занято: ${root_use:-?}%  Доступно: ${root_avail:-?}"
-    df -Ph / 2>/dev/null | tail -n +1
+    echo "Память:"
+    echo "- RAM: $(mem_human)"
     echo ""
-    echo "=== Сеть: интерфейсы ==="
-    ip -br link 2>/dev/null || true
+    echo "Диск:"
+    echo "- / : занято ${disk_use}, свободно ${disk_avail}"
     echo ""
-    echo "=== Сеть: /proc/net/dev (фрагмент) ==="
-    grep -v '^\s*lo:' /proc/net/dev 2>/dev/null | tail -n +3 | head -12 || true
+    echo "Сеть:"
+    echo "- Скорость сейчас (≈за 1 секунду): ${net}"
     echo ""
-    echo "=== Uptime ==="
-    uptime -p 2>/dev/null || uptime
+    echo "Аптайм:"
+    echo "- ${up}"
   }
 }
 

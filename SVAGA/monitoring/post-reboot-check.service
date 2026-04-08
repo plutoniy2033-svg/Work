@@ -8,3 +8,6 @@ Type=oneshot
 WorkingDirectory=/opt/hysteria-monitor
 ExecStart=/opt/hysteria-monitor/bin/post-reboot-check.sh
 
+[Install]
+WantedBy=multi-user.target
+
