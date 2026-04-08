@@ -35,20 +35,30 @@ net_speed_1s() {
 }
 
 active_users_now() {
-  # Считаем уникальные peer IPv4 на входящих сокетах к локальному порту.
-  # Порт задаётся в env: ACTIVE_USERS_PORT=1935
+  # Приоритет: API (если задано) → fallback на порт (ss).
+  if [[ -n "${SASVPN_API_BASE:-}" && -n "${SASVPN_API_KEY:-}" ]]; then
+    resp="$(
+      curl -sS -m 10 \
+        -H "Authorization: ${SASVPN_API_KEY}" \
+        -H "Accept: application/json" \
+        "${SASVPN_API_BASE%/}/api/v1/users/" 2>/dev/null || true
+    )"
+    if [[ -n "$resp" ]]; then
+      n="$(jq -r '[.[].online_count // 0] | add // 0' <<<"$resp" 2>/dev/null || true)"
+      [[ "$n" =~ ^[0-9]+$ ]] && { echo "$n"; return; }
+    fi
+  fi
+
+  # Fallback: считаем уникальные peer IPv4 на входящих сокетах к локальному порту.
   local port="${ACTIVE_USERS_PORT:-}"
   [[ -z "$port" ]] && { echo "?"; return; }
-
   {
-    # UDP: local=$5 peer=$6
     ss -Hnup 2>/dev/null | awk -v p=":${port}$" '$5 ~ p && $6 !~ /^\*:/ {print $6}'
-    # TCP: local=$4 peer=$5
     ss -Hntp 2>/dev/null | awk -v p=":${port}$" '$4 ~ p && $5 !~ /^\*:/ {print $5}'
   } \
-    | sed -E 's/%[^ ]+//; s/^\[//; s/\]$//; s/:[0-9]+$//' \
-    | grep -E '^[0-9]+\.' \
-    | sort -u | wc -l | tr -dc '0-9'
+  | sed -E 's/%[^ ]+//; s/^\[//; s/\]$//; s/:[0-9]+$//' \
+  | grep -E '^[0-9]+\.' \
+  | sort -u | wc -l | tr -dc '0-9'
 }
 
 build_status_report() {
