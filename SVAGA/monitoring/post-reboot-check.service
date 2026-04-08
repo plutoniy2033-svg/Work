@@ -1,0 +1,10 @@
+[Unit]
+Description=После reboot: проверить VPN/monitoring и уведомить в Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/hysteria-monitor
+ExecStart=/opt/hysteria-monitor/bin/post-reboot-check.sh
+

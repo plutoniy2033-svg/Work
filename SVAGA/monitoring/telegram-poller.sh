@@ -40,6 +40,13 @@ json_ok() {
   [[ "$(jq -r '.ok // false' <<<"$j" 2>/dev/null)" == "true" ]]
 }
 
+is_allowed_chat() {
+  local chat_id="$1"
+  local allowed="${2:-}"
+  [[ -z "$allowed" ]] && return 0
+  [[ ",${allowed}," == *",${chat_id},"* ]]
+}
+
 send_to_chat() {
   local cid="$1" text="$2"
   local payload out
@@ -65,6 +72,26 @@ is_status_cmd() {
   t="${t#"${t%%[![:space:]]*}"}"
   t="${t%%$'\r'}"
   [[ "${t,,}" =~ ^/status(@[A-Za-z0-9_]+)?([[:space:]].*)?$ ]]
+}
+
+is_restart_cmd() {
+  local t="${1:-}"
+  t="${t#"${t%%[![:space:]]*}"}"
+  t="${t%%$'\r'}"
+  [[ "${t,,}" =~ ^/restart(@[A-Za-z0-9_]+)?([[:space:]].*)?$ ]]
+}
+
+do_reboot() {
+  local chat_id="$1"
+  local flag="${STATE_DIR}/pending_reboot_check"
+  date -Is >"${flag}.tmp" 2>/dev/null || true
+  mv -f "${flag}.tmp" "${flag}" 2>/dev/null || true
+  chmod 600 "${flag}" 2>/dev/null || true
+
+  send_to_chat "$chat_id" "♻️ Перезагружаю сервер… Через 1–2 минуты пришлю статус сервисов после старта." || true
+
+  # systemd on purpose (service runs as root)
+  systemctl reboot || reboot || shutdown -r now
 }
 
 curl -sS -m 20 "${API}/deleteWebhook?drop_pending_updates=false" >/dev/null 2>&1 || true
@@ -101,14 +128,23 @@ while true; do
     text="$(jq -r '.message.text // .channel_post.text // .edited_message.text // .edited_channel_post.text // empty' <<<"$item" 2>/dev/null)"
     chat_id="$(jq -r '.message.chat.id // .channel_post.chat.id // .edited_message.chat.id // .edited_channel_post.chat.id // empty' <<<"$item" 2>/dev/null)"
 
-    if [[ -n "$text" && -n "$chat_id" ]] && is_status_cmd "$text"; then
-      allowed="${STATUS_ALLOWED_CHAT_IDS:-}"
-      if [[ -n "$allowed" ]]; then
-        [[ ",${allowed}," == *",${chat_id},""* ]] || continue
+    if [[ -n "$text" && -n "$chat_id" ]]; then
+      if is_status_cmd "$text"; then
+        if ! is_allowed_chat "$chat_id" "${STATUS_ALLOWED_CHAT_IDS:-}"; then
+          continue
+        fi
+        echo "poller: /status от chat_id=$chat_id" >&2
+        rep="$(build_status_report)" || rep="ошибка build_status_report"
+        send_to_chat "$chat_id" "$rep" || true
+      elif is_restart_cmd "$text"; then
+        # отдельный allowlist для перезагрузки
+        allowed_restart="${RESTART_ALLOWED_CHAT_IDS:-${STATUS_ALLOWED_CHAT_IDS:-}}"
+        if ! is_allowed_chat "$chat_id" "$allowed_restart"; then
+          continue
+        fi
+        echo "poller: /restart от chat_id=$chat_id" >&2
+        do_reboot "$chat_id"
       fi
-      echo "poller: /status от chat_id=$chat_id" >&2
-      rep="$(build_status_report)" || rep="ошибка build_status_report"
-      send_to_chat "$chat_id" "$rep" || true
     fi
   done < <(jq -c '.result[]?' <<<"$resp" 2>/dev/null)
 

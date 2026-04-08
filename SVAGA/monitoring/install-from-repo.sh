@@ -21,6 +21,7 @@ DEST="/opt/hysteria-monitor"
 mkdir -p "$DEST/bin" "$DEST/config" "$DEST/state"
 
 install -m 755 "$M/hysteria-service-monitor.sh" "$M/load-alert.sh" "$M/telegram-poller.sh" "$DEST/bin/"
+install -m 755 "$M/post-reboot-check.sh" "$DEST/bin/"
 install -m 644 "$M/server-metrics.sh" "$DEST/bin/"
 
 ENV="$DEST/config/hysteria-monitor.env"
@@ -36,16 +37,17 @@ LOAD_ALERT_1M=0
 MEM_ALERT_PCT=90
 DISK_ALERT_PCT=90
 STATUS_ALLOWED_CHAT_IDS=
+RESTART_ALLOWED_CHAT_IDS=
 EOFENV
   chmod 600 "$ENV"
 fi
 
 install -m 644 "$M/hysteria-monitor.service" "$M/hysteria-monitor.timer" \
-  "$M/load-alert.service" "$M/load-alert.timer" "$M/telegram-poller.service" \
+  "$M/load-alert.service" "$M/load-alert.timer" "$M/telegram-poller.service" "$M/post-reboot-check.service" \
   /etc/systemd/system/
 
 systemctl daemon-reload
-systemctl enable hysteria-monitor.timer load-alert.timer telegram-poller.service
+systemctl enable hysteria-monitor.timer load-alert.timer telegram-poller.service post-reboot-check.service
 systemctl restart telegram-poller.service
 systemctl start hysteria-monitor.service 2>/dev/null || true
 systemctl start load-alert.service 2>/dev/null || true
