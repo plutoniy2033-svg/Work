@@ -44,7 +44,8 @@ active_users_now() {
         "${SASVPN_API_BASE%/}/api/v1/users/" 2>/dev/null || true
     )"
     if [[ -n "$resp" ]]; then
-      n="$(jq -r '[.[].online_count // 0] | add // 0' <<<"$resp" 2>/dev/null || true)"
+      # Требование: число уникальных username в ответе.
+      n="$(jq -r '[.[].username // empty] | unique | length' <<<"$resp" 2>/dev/null || true)"
       [[ "$n" =~ ^[0-9]+$ ]] && { echo "$n"; return; }
     fi
   fi

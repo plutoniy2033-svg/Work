@@ -40,7 +40,7 @@ STATUS_ALLOWED_CHAT_IDS=
 RESTART_ALLOWED_CHAT_IDS=
 ACTIVE_USERS_PORT=1935
 # Если задано — активные пользователи считаются через API панели:
-# GET /api/v1/users/ (header Authorization: <apiKey>), суммируется online_count.
+# GET /api/v1/users/ (header Authorization: <apiKey>), считается кол-во уникальных username.
 SASVPN_API_BASE=
 SASVPN_API_KEY=
 EOFENV
