@@ -75,6 +75,20 @@ async function probeHttpPath(host, pathStr) {
  * Не гарантирует, что headless Chromium отрисует тот же UI, что и обычный Chrome.
  */
 export async function probeCorpAccess(env = process.env) {
+  if (
+    env.AUTOSASEST_SKIP_CORP_NETWORK === '1' ||
+    env.AUTOSASEST_SKIP_CORP_NETWORK === 'true'
+  ) {
+    return {
+      ok: true,
+      host: getHost(env),
+      dnsOk: true,
+      probes: [],
+      note:
+        'Проверка CRM отключена (AUTOSASEST_SKIP_CORP_NETWORK). Только для отладки вне корп. сети.',
+    };
+  }
+
   const host = getHost(env);
   let dnsOk = false;
   try {

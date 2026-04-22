@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test';
 import { expect } from '@playwright/test';
+import { injectMangoBoosterIntoPage } from '../helpers/mango-booster-playwright';
 import {
   webadminAuthConfigured,
   webadminEntryUrl,
@@ -7,7 +8,7 @@ import {
 
 /**
  * WebAdmin (ExtJS) → кнопка «Открыть личный кабинет» → в ЛК: «Помощь» → «Поддержка».
- * Один tab или popup — обрабатываем оба варианта.
+ * MangoBooster: после load — addScriptTag({ content }) (полный исходник из Node; без file://).
  */
 export async function runStep03WebadminLk(page: Page) {
   if (!webadminAuthConfigured()) {
@@ -23,6 +24,9 @@ export async function runStep03WebadminLk(page: Page) {
     waitUntil: 'domcontentloaded',
     timeout: 120_000,
   });
+  await page.waitForLoadState('load').catch(() => {});
+
+  await injectMangoBoosterIntoPage(page);
 
   const userField = page.locator('#sswa-login-username');
   await expect(userField).toBeVisible({ timeout: 90_000 });
@@ -55,6 +59,16 @@ export async function runStep03WebadminLk(page: Page) {
   const maybePopup = await popupPromise;
   const cabinet = maybePopup ?? page;
   await cabinet.waitForLoadState('domcontentloaded', { timeout: 90_000 });
+  await cabinet.waitForLoadState('load').catch(() => {});
+
+  const boosterAlready = await cabinet.evaluate(
+    () =>
+      (window as unknown as { __MANGO_BOOSTER_PW_LOADED__?: number })
+        .__MANGO_BOOSTER_PW_LOADED__ === 1,
+  );
+  if (!boosterAlready) {
+    await injectMangoBoosterIntoPage(cabinet);
+  }
 
   const help = cabinet.locator('[data-test-id="help-button"]');
   await expect(help).toBeVisible({ timeout: 120_000 });
@@ -64,5 +78,9 @@ export async function runStep03WebadminLk(page: Page) {
   await expect(support).toBeVisible({ timeout: 30_000 });
   await support.click({ timeout: 30_000 });
 
-  await expect(cabinet).toHaveURL(/\/cabinet\/support/i, { timeout: 60_000 });
+  const lkSupportUrl =
+    /^https:\/\/lk\.mango-office\.ru\/cabinet\/support\/?(?:[?#].*)?$/i;
+  await expect(cabinet).toHaveURL(lkSupportUrl, { timeout: 10_000 });
+  await cabinet.waitForLoadState('load', { timeout: 10_000 });
+  await cabinet.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
 }

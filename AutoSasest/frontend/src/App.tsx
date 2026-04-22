@@ -531,13 +531,21 @@ export default function App() {
               type="button"
               className="primary"
               onClick={() => void run()}
-              disabled={
-                running || !selectedId || net.loading || net.ok === false
-              }
+              disabled={running || !selectedId || net.loading}
             >
               {running ? 'Выполняется…' : 'Запустить'}
             </button>
           </div>
+          {!net.loading && net.ok === false && (
+            <p className="err" style={{ marginTop: '0.35rem', marginBottom: 0 }}>
+              CRM по сети недоступен — «Запустить» вернёт 403, пока нет VPN. Для
+              локальной отладки без корп. сети добавьте в{' '}
+              <span className="mono">AutoSasest/.env</span> переменную{' '}
+              <span className="mono">AUTOSASEST_SKIP_CORP_NETWORK=1</span> и
+              перезапустите <span className="mono">npm run dev:api</span> (или{' '}
+              <span className="mono">npm start</span>).
+            </p>
+          )}
           {selected?.description && (
             <p className="mono" style={{ marginTop: 0 }}>
               {selected.description}

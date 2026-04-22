@@ -132,7 +132,7 @@ app.post('/api/run', async (req, res) => {
     return res.status(403).json({
       error: 'network',
       message:
-        'Запуск возможен только при доступе к корпоративной сети (CRM недоступен).',
+        'Запуск заблокирован: нет доступа к CRM (DNS/HTTP). Подключите VPN или задайте в .env AutoSasest AUTOSASEST_SKIP_CORP_NETWORK=1 (только отладка).',
       detail: net,
     });
   }
