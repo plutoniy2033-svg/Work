@@ -1,0 +1,19 @@
+{
+  "id": "creatio-smoke",
+  "name": "Creatio — короткий smoke",
+  "description": "Вход (нужны CREATIO_USER и CREATIO_PASSWORD в .env)",
+  "specBundle": "e2e/suites/creatio-smoke.serial.spec.ts",
+  "baseHost": "creatio.corp.mango.ru",
+  "steps": [
+    {
+      "id": "02-authorization",
+      "title": "Авторизация: логин, пароль, кнопка «Войти»",
+      "specFile": "02-authorization.spec.ts",
+      "substeps": [
+        { "title": "Открыть страницу логина NUI" },
+        { "title": "Заполнить логин и пароль" },
+        { "title": "Нажать «Войти», дождаться рабочей области" }
+      ]
+    }
+  ]
+}

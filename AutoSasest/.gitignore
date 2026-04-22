@@ -1,0 +1,11 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+playwright/.cache/
+recordings/
+history/
+.env
+e2e/.auth/
+*.log
+.DS_Store

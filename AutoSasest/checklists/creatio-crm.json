@@ -1,0 +1,29 @@
+{
+  "id": "creatio-crm",
+  "name": "Creatio CRM (creatio.corp.mango.ru)",
+  "description": "Serial 02→03 в одном окне: Creatio, затем WebAdmin → ЛК → Поддержка (WEBADMIN_*). Письмо/SMTP — отдельный чек-лист или e2e/steps/05-email-to-case.spec.ts.",
+  "specBundle": "e2e/suites/creatio-crm.serial.spec.ts",
+  "baseHost": "creatio.corp.mango.ru",
+  "steps": [
+    {
+      "id": "02-authorization",
+      "title": "Авторизация: логин, пароль, кнопка «Войти»",
+      "specFile": "02-authorization.spec.ts",
+      "substeps": [
+        { "title": "Открыть страницу логина NUI" },
+        { "title": "Заполнить логин и пароль" },
+        { "title": "Нажать «Войти», сохранить сессию" }
+      ]
+    },
+    {
+      "id": "03-webadmin-lk",
+      "title": "WebAdmin: вход → ЛК → Помощь → Поддержка",
+      "specFile": "03-webadmin-lk.spec.ts",
+      "substeps": [
+        { "title": "Страница WebAdmin, логин и пароль, «Войти»" },
+        { "title": "Кнопка «Открыть личный кабинет» (новая вкладка или тот же tab)" },
+        { "title": "«Помощь» → ссылка «Поддержка», URL /cabinet/support" }
+      ]
+    }
+  ]
+}

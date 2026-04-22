@@ -1,0 +1,20 @@
+{
+  "id": "creatio-email",
+  "name": "Creatio — письмо в заявку (SMTP)",
+  "description": "Только шаг 05: SMTP → раздел Обращения → тема в списке. Нужны SMTP_* и сессия (сначала прогон 02 или corp.json). specBundle: один тест.",
+  "specBundle": "e2e/suites/creatio-email.serial.spec.ts",
+  "baseHost": "creatio.corp.mango.ru",
+  "steps": [
+    {
+      "id": "05-email-to-case",
+      "title": "Письмо (тема, текст, вложения) → заявка",
+      "specFile": "05-email-to-case.spec.ts",
+      "hideVideo": true,
+      "substeps": [
+        { "title": "Отправка письма по SMTP" },
+        { "title": "«Обращения», фильтр по группе ответственных" },
+        { "title": "Ожидание темы письма в списке" }
+      ]
+    }
+  ]
+}

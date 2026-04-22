@@ -1,0 +1,37 @@
+{
+  "name": "autosasest",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "postinstall": "playwright install chromium",
+    "dev": "concurrently -k \"npm run dev:api\" \"npm run dev:ui\"",
+    "dev:api": "node server/server.mjs",
+    "dev:ui": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "start": "node server/server.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "glob": "^11.0.0",
+    "nanoid": "^5.0.9",
+    "nodemailer": "^6.10.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@types/nodemailer": "^6.4.23",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}
